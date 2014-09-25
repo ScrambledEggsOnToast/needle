@@ -1,24 +1,54 @@
+{-# LANGUAGE OverloadedStrings, TemplateHaskell #-}
+
 module Control.Arrow.Needle.Parse where
 
 import qualified Data.Map.Strict as M
 
 import qualified Data.Text as T
 import Data.Maybe
+import Data.Monoid
 
 import Text.Parsec
 import Text.Parsec.Extra
+import Data.Char
 
 import Control.Monad
 import Control.Applicative ((<$>), (<*>))
 import Control.Monad.State
+import Control.Arrow
+
+import Language.Haskell.TH
+import Language.Haskell.TH.Quote
+
+needle :: QuasiQuoter
+needle = QuasiQuoter 
+    { quoteExp = \str -> case (parseNeedle str) of
+        Left e -> error . show $ e
+        Right n -> buildArrow n
+    }
+
+buildArrow :: (NGArrow, Int) -> Q Exp
+buildArrow (a, nIns) = do
+    ins <- mapM (newName . T.unpack . inNm) [1..nIns]
+    let f (NGIn n) = return 
+            $ AppE (VarE $ mkName "Control.Arrow.arr") 
+            $ LamE [TupP $ map VarP ins] (VarE (ins !! (n-1)))
+        f (NGJoin a1 a2) = do
+            e1 <- f a1
+            e2 <- f a2
+            return $ InfixE (Just e1) (VarE $ mkName "Control.Arrow.&&&") (Just e2)
+        f (NGThrough (NExtArrow t) a) = do
+            let ea = VarE . mkName . T.unpack $ t
+            b <- f a
+            return $ InfixE (Just b) (VarE $ mkName "Control.Arrow.>>>") (Just ea)
+    f a
 
 newtype NExtArrow = NExtArrow T.Text deriving (Show, Eq)
-newtype NType = NType (Maybe T.Text) deriving (Show, Eq)
 newtype NLabel = NLabel T.Text deriving (Show, Eq)
 
 data SwitchDir = SUp | SDown deriving (Show, Eq)
 
-data NTrackElem = NTrackIn Int NType
+data NTrackElem = NTrackIn Int
                 | NTrackOut
                 | NTrackExtArrow NExtArrow
                 | NTrackLabelIn NLabel
@@ -37,16 +67,34 @@ newtype NLine = NLine [NTrack] deriving (Show, Eq)
 
 type NLines = [NLine]
 
-data NGArrow = NGIn Int NType | NGJoin [NGArrow] | NGThrough NExtArrow NGArrow deriving Show
+functionify :: (NGArrow, Int) -> T.Text
+functionify (a, nIns) = "(" <> inStr <> f a <> ")"
+  where
+    inStr = "\\(" <> T.intercalate ", " (map inNm [1..nIns]) <> ") ->"
+    f (NGIn n) = inNm n
+    f (NGJoin a1 a2) = "(" <> f a1 <> ", " <> f a2 <> ")"
+    f (NGThrough (NExtArrow t) a') = t <> " (" <> f a' <> ")"
 
-parseNeedle :: String -> Either ParseError NGArrow
-parseNeedle = fmap linesToNGArrow . parseLines
+inNm :: Int -> T.Text
+inNm n = "__" <> T.pack (show n)
+
+numIns :: NGArrow -> Int
+numIns (NGIn n) = n
+numIns (NGJoin a1 a2) = max (numIns a1) (numIns a2)
+numIns (NGThrough _ a) = numIns a
+
+data NGArrow = NGIn Int | NGJoin NGArrow NGArrow | NGThrough NExtArrow NGArrow deriving Show
+
+parseNeedle :: String -> Either ParseError (NGArrow, Int)
+parseNeedle = fmap (first linesToNGArrow) . parseLines
+
+joinList :: [NGArrow] -> NGArrow
+joinList [] = error "no joinable things"
+joinList [a] = a
+joinList (a:as) = NGJoin a (joinList as)
 
 linesToNGArrow :: NLines -> NGArrow
-linesToNGArrow ls = case ops of
-    [] -> error "no outputs"
-    [op] -> (uncurry $ ngArrowUpToPosition ls) op
-    _ -> NGJoin . map (uncurry $ ngArrowUpToPosition ls) $ ops
+linesToNGArrow ls = joinList . map (uncurry $ ngArrowUpToPosition ls) $ ops
   where
     trackEnds = zip [0..] ls >>= (\(r, NLine ts) -> [(r, last t) | NTrack t@(e:_) <- ts])
     ops = map (\(r,(_,(c,_))) -> (r,c-1)) . filter ((== NTrackOut) . fst . snd) $ trackEnds
@@ -55,9 +103,9 @@ ngArrowUpToPosition :: NLines -> Line -> Column -> NGArrow
 ngArrowUpToPosition ls r c = process lbs
   where
     process lbs' = case lbs' of
-        [(_, (NTrackIn n t, _))] -> NGIn n t
+        [(_, (NTrackIn n, _))] -> NGIn n
         [(r', (NTrackExtArrow a, (c',_)))] -> NGThrough a (ngArrowUpToPosition ls r' (c'-1))
-        lbs'' -> NGJoin . map (process . return) $ lbs''
+        lbs'' -> joinList . map (process . return) $ lbs''
     lbs = lookBack ls r c
 
 (!) :: [a] -> Int -> Maybe a
@@ -96,7 +144,7 @@ lookBack ls r c = do
     let rE = return (r, (e,(c1,c2)))
 
     case e of
-            NTrackIn _ _ -> rE
+            NTrackIn _ -> rE
             NTrackExtArrow _ -> rE
             NTrackLabelIn label -> do
                 let (r',(_,(c',_))) = case (findLabelOut ls label) of
@@ -113,7 +161,7 @@ lookBack ls r c = do
                             ce'' <- maybeToList $ nLookupBefore ls (r'+d) (c1-1)
                             return (r'+d, ce'')
                         _ -> []
-                let l = lookBack ls r (c - 1)
+                let l = lookBack ls r (c1 - 1)
                 case dir of
                     SUp -> l ++ go (r,ce)
                     SDown -> go (r,ce) ++ l
@@ -139,15 +187,20 @@ findLabelOut ls label = do
 
 type NLineParser = Parsec String Int
 
-parseLines :: String -> Either ParseError [NLine]
+parseLines :: String -> Either ParseError (NLines, Int)
 parseLines = runParser (do
-    ls <- aLine `sepBy` many1 eol
+    ls <- many aLine
     eof
-    return ls) 0 ""
+    n <- getState
+    return (ls, n)) 0 "" . (++ "\n")
+
+sameLineSpaces :: NLineParser ()
+sameLineSpaces = skipMany . satisfy $ \c -> not (c `elem` "\r\n") && isSpace c
 
 aLine :: NLineParser NLine
 aLine = do
-    ms <- many (spaces >> aTrack) 
+    sameLineSpaces
+    ms <- manyTill (sameLineSpaces >> aTrack) (sameLineSpaces >> eol)
     return $ NLine (ms)
 
 aTrack :: NLineParser NTrack
@@ -185,12 +238,10 @@ columned p = do
 
 aTrackIn :: NLineParser NTrackElem
 aTrackIn = (do
-    t <- aType
-    spaces
     void $ char '}'
     modifyState (+1)
     n <- getState
-    return $ NTrackIn n t) <?> "arrow input"
+    return $ NTrackIn n) <?> "arrow input"
 
 aTrackOut :: NLineParser NTrackElem
 aTrackOut = (do
@@ -247,16 +298,6 @@ aLabel = do
     f <- lower
     r <- many letter
     return . NLabel . T.pack $ f : r
-
-aType :: NLineParser NType
-aType = NType <$> (do
-    mf <- optionMaybe upper
-    case mf of
-        Just f -> do
-            r <- many letter
-            return $ Just $ T.pack (f:r)
-        Nothing -> return Nothing
-    ) <?> "type"
 
 rails :: NLineParser ()
 rails = void (many (char '=')) <?> "rails" 
