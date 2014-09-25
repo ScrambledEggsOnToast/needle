@@ -3,7 +3,7 @@
 
 name:                needle
 version:             0.1.0.0
--- synopsis:            
+synopsis:            ASCII-fied arrow notation
 -- description:         
 license:             MIT
 license-file:        LICENSE
