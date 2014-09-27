@@ -1,8 +1,12 @@
 module Control.Arrow.Needle (
-    module Control.Arrow
-  , module Control.Arrow.Needle.Parse
+    nd
+  , ndFile
+    -- * Reexported for your convenience
+  , module Control.Arrow
 ) where
 
+
 import Control.Arrow
-import Control.Arrow.Needle.Parse
+
+import Control.Arrow.Needle.TH (nd, ndFile)
 

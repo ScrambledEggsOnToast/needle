@@ -1,15 +1,21 @@
-{-# LANGUAGE OverloadedStrings, TemplateHaskell #-}
-
-module Control.Arrow.Needle.Parse where
+module Control.Arrow.Needle.Parse (
+  -- * Parsing needles
+    NeedleArrow (..)
+  , parseNeedle
+  -- * Errors
+  , NeedleError (..)
+  , presentNeedleError
+  ) where
 
 import qualified Data.Map.Strict as M
 
 import qualified Data.Text as T
 import Data.Maybe
+import Data.Either
 import Data.Monoid
 
-import Text.Parsec
-import Text.Parsec.Extra
+import Text.Parsec as P
+import Text.Parsec.Extra (natural)
 import Data.Char
 
 import Control.Monad
@@ -17,287 +23,294 @@ import Control.Applicative ((<$>), (<*>))
 import Control.Monad.State
 import Control.Arrow
 
-import Language.Haskell.TH
-import Language.Haskell.TH.Quote
+import Control.Arrow.Needle.Internal.UnevenGrid as G
 
-needle :: QuasiQuoter
-needle = QuasiQuoter 
-    { quoteExp = \str -> case (parseNeedle str) of
-        Left e -> error . show $ e
-        Right n -> buildArrow n
-    }
+--------------------------------
+-- Types
+--------------------------------
 
-buildArrow :: (NGArrow, Int) -> Q Exp
-buildArrow (a, nIns) = do
-    ins <- mapM (newName . T.unpack . inNm) [1..nIns]
-    let f (NGIn n) = return 
-            $ AppE (VarE $ mkName "Control.Arrow.arr") 
-            $ LamE [TupP $ map VarP ins] (VarE (ins !! (n-1)))
-        f (NGJoin a1 a2) = do
-            e1 <- f a1
-            e2 <- f a2
-            return $ InfixE (Just e1) (VarE $ mkName "Control.Arrow.&&&") (Just e2)
-        f (NGThrough (NExtArrow t) a) = do
-            let ea = VarE . mkName . T.unpack $ t
-            b <- f a
-            return $ InfixE (Just b) (VarE $ mkName "Control.Arrow.>>>") (Just ea)
-    f a
+-- | The datatype representing a generic needle arrow
 
-newtype NExtArrow = NExtArrow T.Text deriving (Show, Eq)
-newtype NLabel = NLabel T.Text deriving (Show, Eq)
+data NeedleArrow = Input Int Int
+                 | Through NeedleArrow T.Text
+                 | Select NeedleArrow Int
+                 | Join [NeedleArrow]
+    deriving (Show, Read, Eq)
 
-data SwitchDir = SUp | SDown deriving (Show, Eq)
+-- | The grid element for the first round of parsing
 
-data NTrackElem = NTrackIn Int
-                | NTrackOut
-                | NTrackExtArrow NExtArrow
-                | NTrackLabelIn NLabel
-                | NTrackLabelOut NLabel
-                | NTrackSwitch SwitchDir
-                | NTrackTunnelEntrance
-                | NTrackTunnelExit
-                | NTrackSplit
-    deriving (Show, Eq)
+data NeedleElem = None
+                | Track
+                | In Int Int
+                | Out
+                | LabelIn T.Text
+                | LabelOut T.Text
+                | ExtArrow T.Text
+                | Switch Direction
+                | TunnelEntrance
+                | TunnelExit
+                | Sel Int
+    deriving (Show, Read, Eq)
 
-type Columned a = (a, (Column, Column))
+-- | Errors in parsing
 
-newtype NTrack = NTrack [Columned NTrackElem] deriving (Show, Eq)
+data NeedleError = ParseError String
+                 | ConstructionError String
 
-newtype NLine = NLine [NTrack] deriving (Show, Eq)
+instance Show NeedleError where
+    show = presentNeedleError
 
-type NLines = [NLine]
+-- | Present the error
 
-functionify :: (NGArrow, Int) -> T.Text
-functionify (a, nIns) = "(" <> inStr <> f a <> ")"
+presentNeedleError :: NeedleError -> String
+presentNeedleError (ParseError s) = "Needle parse error:\n"++s
+presentNeedleError (ConstructionError s) = "Needle construction error:\n"++s
+
+data Direction = Up | Down
+    deriving (Show, Read, Eq)
+
+type NeedleGrid = Grid NeedleElem
+
+--------------------------------
+-- String -> NeedleArrow
+--------------------------------
+
+-- | Parse a string to a needle
+
+parseNeedle :: String -> Either NeedleError NeedleArrow
+parseNeedle = parseNeedleGrid >=> gridArrow
+
+--------------------------------
+-- NeedleGrid -> NeedleArrow
+--------------------------------
+
+gridArrow :: NeedleGrid -> Either NeedleError NeedleArrow
+gridArrow grid = do
+        os <- mapM (arrowToPosition grid) $ outputPositions grid
+        maybe (Left $ ConstructionError "No outputs") return $ arrowJoin os
+
+outputPositions :: NeedleGrid -> [GridPosition]
+outputPositions = findPositions (== Out)
+
+findLabelOutPosition :: T.Text -> GridExamine NeedleElem (Maybe GridPosition)
+findLabelOutPosition t = do
+    grid <- getGrid
+    return $ listToMaybe (findPositions (== (LabelOut t)) grid)
+
+arrowJoin :: [NeedleArrow] -> Maybe NeedleArrow
+arrowJoin [] = Nothing
+arrowJoin [a] = Just a
+arrowJoin as = Just $ Join as
+
+arrowToPosition :: NeedleGrid -> GridPosition -> Either NeedleError NeedleArrow
+arrowToPosition grid pos = gridExamine grid pos go
   where
-    inStr = "\\(" <> T.intercalate ", " (map inNm [1..nIns]) <> ") ->"
-    f (NGIn n) = inNm n
-    f (NGJoin a1 a2) = "(" <> f a1 <> ", " <> f a2 <> ")"
-    f (NGThrough (NExtArrow t) a') = t <> " (" <> f a' <> ")"
+    err = return . Left . ConstructionError
+    success = return . Right
+    
+    tryPath path = branch $ do
+        mp <- path
+        case mp of
+            Nothing -> err "Nothing on this path"
+            Just _ -> go
 
-inNm :: Int -> T.Text
-inNm n = "__" <> T.pack (show n)
+    go = do
+        mh <- hereGet
+        case mh of
+            Nothing -> err "Position not in grid"
+            Just h -> case h of
+                None -> err "Arrow from nothing"
+                Track -> do
+                    w <- fromJust <$> width
+                    ups <- forM [0 .. (w - 1)] $ \n -> tryPath $ do
+                        e <- lUpGet n
+                        return $ mfilter (== (Switch Down)) e
+                    downs <- forM [0 .. (w - 1)] $ \n -> tryPath $ do
+                        e <- lDownGet n
+                        return $ mfilter (== (Switch Up)) e
+                    left <- tryPath leftGet
+                    let paths = rights $ left : ups ++ downs
+                        mJoint = arrowJoin paths
+                    case mJoint of
+                        Nothing -> do
+                            (n, _) <- G.getPosition
+                            err $ "Track from nowhere on line " ++ show (n + 1)
+                        Just joint -> success joint
+                In n m -> success $ Input n m
+                Out -> do
+                    ml <- leftGet
+                    case ml of
+                        Just l -> go
+                        Nothing -> err "An output has no arrow going into it"
+                LabelIn t -> do
+                    mlo <- findLabelOutPosition t
+                    case mlo of
+                        Just lo -> putPosition lo >> go
+                        Nothing -> err $ "Found label-in '" ++ T.unpack t ++ "' with no label-out"
+                LabelOut t -> do
+                    ml <- leftGet
+                    case ml of
+                        Just l -> go
+                        Nothing -> err $ "Label-out '" ++ T.unpack t ++ "' has no arrow going into it"
+                ExtArrow t -> do
+                    left <- tryPath leftGet
+                    up <- tryPath $ do
+                        e <- lUpGet 0
+                        return $ mfilter (== (Switch Down)) e
+                    down <- tryPath $ do
+                        e <- lDownGet 0
+                        return $ mfilter (== (Switch Up)) e
+                    let paths = rights $ [left,up,down]
+                        mJoint = arrowJoin paths
+                    case mJoint of
+                        Nothing -> do
+                            (n, _) <- G.getPosition
+                            err $ "External arrow '" ++ T.unpack t ++ "' on line " ++ show (n + 1) ++ " has no arrow going into it"
+                        Just joint -> success $ Through joint t
+                Switch d -> do
+                    left <- tryPath leftGet
+                    continuing <- tryPath $ do
+                        e <- case d of
+                            Down -> lUpGet 0
+                            Up -> lDownGet 0
+                        return $ mfilter (== h) e
+                    let paths = rights $ [left, continuing]
+                        mJoint = arrowJoin paths
+                    case mJoint of
+                        Nothing -> do
+                            (n, _) <- G.getPosition
+                            err $ "Line switch from nowhere on line " ++ (show n)
+                        Just joint -> success joint
+                TunnelExit -> do
+                    let tunnel n = if n == 0 
+                            then go
+                            else do
+                                ml <- leftGet
+                                case ml of
+                                    Nothing -> do
+                                        (n,_) <- G.getPosition
+                                        err $ "Tunnel from nowhere on line " ++ (show n)
+                                    Just TunnelExit -> tunnel (n+1)
+                                    Just TunnelEntrance -> tunnel (n-1)
+                                    Just _ -> tunnel n
+                    tunnel 1
+                TunnelEntrance -> do
+                    ml <- leftGet
+                    case ml of
+                        Nothing -> do
+                            (n,_) <- G.getPosition
+                            err $ "Tunnel entrance has no arrow going into it on line " ++ (show n)
+                        Just _ -> go
 
-numIns :: NGArrow -> Int
-numIns (NGIn n) = n
-numIns (NGJoin a1 a2) = max (numIns a1) (numIns a2)
-numIns (NGThrough _ a) = numIns a
+                Sel n -> do
+                    ml <- leftGet
+                    case ml of
+                        Nothing -> do
+                            (n,_) <- G.getPosition
+                            err $ "Selector has no arrow going into it on line " ++ (show n)
+                        Just _ -> do
+                            g <- go
+                            return $ (flip Select n) <$> g
 
-data NGArrow = NGIn Int | NGJoin NGArrow NGArrow | NGThrough NExtArrow NGArrow deriving Show
+--------------------------------
+-- String -> NeedleGrid
+--------------------------------
 
-parseNeedle :: String -> Either ParseError (NGArrow, Int)
-parseNeedle = fmap (first linesToNGArrow) . parseLines
+-- | Pretty print a needle grid
 
-joinList :: [NGArrow] -> NGArrow
-joinList [] = error "no joinable things"
-joinList [a] = a
-joinList (a:as) = NGJoin a (joinList as)
-
-linesToNGArrow :: NLines -> NGArrow
-linesToNGArrow ls = joinList . map (uncurry $ ngArrowUpToPosition ls) $ ops
+prettyNeedleGrid :: NeedleGrid -> String
+prettyNeedleGrid = prettyGrid prettyElem
   where
-    trackEnds = zip [0..] ls >>= (\(r, NLine ts) -> [(r, last t) | NTrack t@(e:_) <- ts])
-    ops = map (\(r,(_,(c,_))) -> (r,c-1)) . filter ((== NTrackOut) . fst . snd) $ trackEnds
+    prettyElem None           n = replicate n ' '
+    prettyElem Track          n = replicate n '='
+    prettyElem (In _ _)       n = replicate (n-1) ' ' ++ "}"
+    prettyElem Out            n = ">" ++ replicate (n-1) ' '
+    prettyElem (LabelIn t)    n = replicate (n - 1 - length s) ' ' ++ s ++ ":"
+      where 
+        s = T.unpack t
+    prettyElem (LabelOut t)   n = ":" ++ s ++ replicate (n - 1 - length s) ' ' 
+      where 
+        s = T.unpack t
+    prettyElem (ExtArrow t)   n = "{" ++ s ++ replicate (n - 2 - length s) ' ' ++ "}"
+      where
+        s = T.unpack t
+    prettyElem (Switch Up)    n = replicate n '/'
+    prettyElem (Switch Down)  n = replicate n '\\'
+    prettyElem TunnelEntrance n = replicate n ')'
+    prettyElem TunnelExit     n = replicate n '('
+    prettyElem (Sel i)        n = s ++ prettyElem Track (n - length s)
+      where
+        s = show i
 
-ngArrowUpToPosition :: NLines -> Line -> Column -> NGArrow
-ngArrowUpToPosition ls r c = process lbs
+-- | Parse a needle grid
+
+parseNeedleGrid :: String -> Either NeedleError NeedleGrid
+parseNeedleGrid s = case result of
+    Left pe -> Left . ParseError $
+            "line " ++ (show . sourceLine . errorPos $ pe) ++ ":\n" ++
+            ls !! ((sourceLine . errorPos $ pe) - 1) ++ "\n" ++
+            replicate ((sourceColumn . errorPos $ pe) - 1) ' ' ++ "^"
+    Right x -> Right (grid x)
   where
-    process lbs' = case lbs' of
-        [(_, (NTrackIn n, _))] -> NGIn n
-        [(r', (NTrackExtArrow a, (c',_)))] -> NGThrough a (ngArrowUpToPosition ls r' (c'-1))
-        lbs'' -> joinList . map (process . return) $ lbs''
-    lbs = lookBack ls r c
+    result = zipWithM parseLine ls [1..]
+    ls = lines s
+    parseLine l n = runParser (do
+        p <- P.getPosition
+        setPosition $ setSourceLine p n
+        es <- many (withWidth . choice . map try $ elemParsers n)
+        void $ try (string "-- " >> many anyChar)
+        eof
+        return es) 0 "needle expression" l
+    withWidth p = do
+        c1 <- sourceColumn <$> P.getPosition
+        x <- p
+        c2 <- sourceColumn <$> P.getPosition
+        return (x, c2 - c1)
 
-(!) :: [a] -> Int -> Maybe a
-(!) [] _ = Nothing
-(!) (a:as) 0 = Just a
-(!) (_:as) n = as ! (n-1)
-
-trRanges :: NLine -> Maybe [(Column,Column)]
-trRanges (NLine ts) = mapM (\(NTrack es) -> (,) <$> (listToMaybe . map (fst . snd) $ es) <*>  (listToMaybe . reverse . map (snd . snd) $ es)) ts
-
-nLookup :: NLines -> Line -> Column -> Maybe (Either (Columned NTrackElem) (Columned NTrackElem, Columned NTrackElem))
-nLookup ls r c = do
-    l@(NLine ts) <- ls ! r
-    trRs <- trRanges l
-    trN <- listToMaybe . map fst . filter ((>c) . snd . snd) . filter ((<=c) . fst . snd) $ zip [0..] trRs
-    (NTrack es) <- ts ! trN
-    let me = listToMaybe . filter ((>c) . snd . snd) . filter ((<=c) . fst . snd) $ es
-    case me of
-        Just e -> return $ Left e
-        Nothing -> do
-            e1 <- listToMaybe . reverse . filter ((<c) . fst . snd) $ es
-            e2 <- listToMaybe . filter ((>=c) . snd . snd) $ es
-            return $ Right (e1, e2)
-
-nLookupBefore :: NLines -> Line -> Column -> Maybe (Columned NTrackElem)
-nLookupBefore ls r c = do
-    lu <- nLookup ls r c
-    return $ case lu of
-            Left e -> e
-            Right (e,_) -> e
-
-lookBack :: NLines -> Line -> Column -> [(Line, (NTrackElem, (Column, Column)))]
-lookBack ls r c = do
-    ce@(e, (c1,c2)) <- maybeToList $ nLookupBefore ls r c
-
-    let rE = return (r, (e,(c1,c2)))
-
-    case e of
-            NTrackIn _ -> rE
-            NTrackExtArrow _ -> rE
-            NTrackLabelIn label -> do
-                let (r',(_,(c',_))) = case (findLabelOut ls label) of
-                        Just x -> x
-                        Nothing -> error $ "no label out found for: "++ show label
-                lookBack ls r' (c' - 1)
-            NTrackSwitch dir -> do
-                let d = case dir of
-                        SUp -> 1
-                        SDown -> -1
-                let go (r', ce') = case (nLookup ls (r'+d) c1) of
-                        Just (Left n@(NTrackSwitch dir, _)) -> go (r'+d, n)
-                        Just (Left (NTrackSplit,_)) -> do
-                            ce'' <- maybeToList $ nLookupBefore ls (r'+d) (c1-1)
-                            return (r'+d, ce'')
-                        _ -> []
-                let l = lookBack ls r (c1 - 1)
-                case dir of
-                    SUp -> l ++ go (r,ce)
-                    SDown -> go (r,ce) ++ l
-            NTrackSplit -> lookBack ls r (c-1)
-            NTrackTunnelExit -> do
-                let go 0 c = lookBack ls r (c-1)
-                    go n' c' = case (nLookupBefore ls r (c'-1)) of
-                        Just (NTrackTunnelEntrance,_) -> go (n'-1) (c'-1)
-                        Just (NTrackTunnelExit,_) -> go (n'+1) (c'-1)
-                        _ -> go n' (c'-1)
-                go 1 c1
-            _ -> error ("This shouldn't be here: " ++ show e)
-
-findLabelOut :: NLines -> NLabel -> Maybe (Line, Columned NTrackElem)
-findLabelOut ls label = do
-    let go _ [] = Nothing
-        go r ((NLine ts):ls') = do
-            let es = concatMap (\(NTrack x) -> x) ts
-            case (filter ((== NTrackLabelOut label) . fst) es) of
-                (e:_) -> Just (r, e)
-                _ -> go (r+1) ls'
-    go 0 ls
-
-type NLineParser = Parsec String Int
-
-parseLines :: String -> Either ParseError (NLines, Int)
-parseLines = runParser (do
-    ls <- many aLine
-    eof
-    n <- getState
-    return (ls, n)) 0 "" . (++ "\n")
-
-sameLineSpaces :: NLineParser ()
-sameLineSpaces = skipMany . satisfy $ \c -> not (c `elem` "\r\n") && isSpace c
-
-aLine :: NLineParser NLine
-aLine = do
-    sameLineSpaces
-    ms <- manyTill (sameLineSpaces >> aTrack) (sameLineSpaces >> eol)
-    return $ NLine (ms)
-
-aTrack :: NLineParser NTrack
-aTrack = try (do
-    firstElem <- columned $ aTrackIn 
-                        <|> aTrackSwitcher 
-                        <|> aTrackExtArrow 
-                        <|> aTrackTunnelExit 
-                        <|> aTrackLabelIn
-
-    let go bs = (rails >>) $ (do
-            b <- columned $ aTrackSwitcher
-                        <|> aTrackSplit
-            let bs' = bs ++ [b]
-            go bs' <|> return bs') <|> (do
-            b <- columned aTrackExtArrow
-            let bs' = bs ++ [b]
-            go bs') <|> (do
-            b <- columned $ aTrackLabelOut
-                        <|> aTrackOut 
-                        <|> aTrackTunnelEntrance
-            let bs' = bs ++ [b]
-            return bs')
-    otherElems <- go []
-    return . NTrack $ firstElem : otherElems) <|> (do
-    s <- columned aTrackSwitcher
-    return . NTrack $ [s])
-
-columned :: NLineParser a -> NLineParser (Columned a)
-columned p = do
-    startColumn <- sourceColumn <$> getPosition
-    a <- p
-    endColumn <- sourceColumn <$> getPosition
-    return (a, (startColumn, endColumn))
-
-aTrackIn :: NLineParser NTrackElem
-aTrackIn = (do
-    void $ char '}'
-    modifyState (+1)
-    n <- getState
-    return $ NTrackIn n) <?> "arrow input"
-
-aTrackOut :: NLineParser NTrackElem
-aTrackOut = (do
-    void $ char '>'
-    return $ NTrackOut) <?> "arrow output"
-
-aTrackExtArrow :: NLineParser NTrackElem
-aTrackExtArrow = (do
-    a <- between (char '{' >> spaces) (spaces >> char '}') . many $ do
-        c <- lookAhead (spaces >> anyChar)
-        if c == '}'
-            then fail "close"
-            else anyChar
-    return $ NTrackExtArrow (NExtArrow $ T.pack a)) <?> "external arrow"
-
-aTrackSwitcher :: NLineParser NTrackElem
-aTrackSwitcher = (do 
-    void $ char '\\'
-    return $ NTrackSwitch SDown) <|> (do 
-    void $ char '/'
-    return $ NTrackSwitch SUp) <?> "track switcher"
-
-aTrackTunnelEntrance :: NLineParser NTrackElem
-aTrackTunnelEntrance = (do
-    void $ char ')'
-    return $ NTrackTunnelEntrance) <?> "tunnel entrance"
-
-aTrackTunnelExit :: NLineParser NTrackElem
-aTrackTunnelExit = (do
-    void $ char '('
-    return $ NTrackTunnelExit) <?> "tunnel exit"
-
-aTrackLabelIn :: NLineParser NTrackElem
-aTrackLabelIn = (do
-    t <- aLabel
-    spaces
-    void $ char ':'
-    return $ NTrackLabelIn t) <?> "label in"
-
-aTrackLabelOut :: NLineParser NTrackElem
-aTrackLabelOut = (do
-    void $ char ':'
-    spaces
-    t <- aLabel
-    return $ NTrackLabelOut t) <?> "label out"
-
-aTrackSplit :: NLineParser NTrackElem
-aTrackSplit = (do
-    void $ char 'o'
-    return NTrackSplit) <?> "track split"
-
-aLabel :: NLineParser NLabel
-aLabel = do
-    f <- lower
-    r <- many letter
-    return . NLabel . T.pack $ f : r
-
-rails :: NLineParser ()
-rails = void (many (char '=')) <?> "rails" 
+    elemParsers n = [
+        do
+            many1 space
+            return None
+      , do
+            many1 (char '=')
+            return Track
+      , do
+            void (char '}')
+            m <- getState
+            modifyState (+1)
+            return $ In n m
+      , do
+            void (char '>')
+            return Out
+      , do
+            l <- many1 letter
+            spaces
+            void (char ':')
+            return $ LabelIn (T.pack l)
+      , do
+            void (char ':')
+            spaces
+            l <- many1 letter
+            return $ LabelOut (T.pack l)
+      , do
+            void (char '{')
+            f <- anyChar
+            l <- manyTill anyChar (char '}')
+            return $ ExtArrow (T.pack $ f : l)
+      , do
+            void (char '/')
+            return $ Switch Up
+      , do
+            void (char '\\')
+            return $ Switch Down
+      , do
+            void (char ')')
+            return TunnelEntrance
+      , do
+            void (char '(')
+            return TunnelExit
+      , do
+            s <- natural
+            return $ Sel (fromIntegral s)
+      ]
+    
