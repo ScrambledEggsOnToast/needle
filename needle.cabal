@@ -31,4 +31,4 @@ library
 
 source-repository head
   type:     git
-  location: git://github.com/ScrambledEggsOnToast/needle.git
+  location: http://github.com/ScrambledEggsOnToast/needle.git

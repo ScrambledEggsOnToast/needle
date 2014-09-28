@@ -137,7 +137,7 @@ arrowToPosition grid pos = gridExamine grid pos go
                         e <- lDownGet n
                         return $ mfilter (== (Switch Up)) e
                     left <- tryPath leftGet
-                    let paths = rights $ left : ups ++ downs
+                    let paths = rights $ ups ++ [left] ++ downs
                         mJoint = arrowJoin paths
                     case mJoint of
                         Nothing -> do
@@ -168,7 +168,7 @@ arrowToPosition grid pos = gridExamine grid pos go
                     down <- tryPath $ do
                         e <- lDownGet 0
                         return $ mfilter (== (Switch Up)) e
-                    let paths = rights $ [left,up,down]
+                    let paths = rights $ [up,left,down]
                         mJoint = arrowJoin paths
                     success $ Through mJoint t
                 Switch d -> do
@@ -178,7 +178,9 @@ arrowToPosition grid pos = gridExamine grid pos go
                             Down -> lUpGet 0
                             Up -> lDownGet 0
                         return $ mfilter (== h) e
-                    let paths = rights $ [left, continuing]
+                    let paths = rights $ case d of
+                            Down -> [continuing, left]
+                            Up -> [left, continuing]
                         mJoint = arrowJoin paths
                     case mJoint of
                         Nothing -> do
