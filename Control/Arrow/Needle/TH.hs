@@ -20,6 +20,8 @@ import Prelude as Pre
 import Control.Arrow.Needle.Parse
 import Control.Arrow
 
+import Data.Maybe
+
 import Control.Applicative
 
 import Language.Haskell.TH
@@ -81,9 +83,13 @@ arrowQ arrow = do
             $ AppE (VarE $ mkName "arr") 
             $ LamE [TupP $ Pre.map VarP iNames] (VarE (iName i))
 
-        f (Through a t) = do
+        f (Through ma t) = do
             let ea = either error id $ parseExp . T.unpack $ t
-            b <- f a
+            b <- case ma of
+                Nothing -> return 
+                    $ AppE (VarE $ mkName "arr") 
+                    $ LamE [TupP $ Pre.map VarP iNames] (ConE $ mkName "()")
+                Just a -> f a
             return $ InfixE (Just b) (VarE $ mkName ">>>") (Just ea)
 
         f (Join as) = do
@@ -105,5 +111,5 @@ arrowQ arrow = do
 
 inputs :: NeedleArrow -> [(Int, Int)]
 inputs (Input a b) = [(a,b)]
-inputs (Through a _) = inputs a
+inputs (Through ma _) = maybe [] inputs ma
 inputs (Join as) = as >>= inputs

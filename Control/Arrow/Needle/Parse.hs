@@ -42,7 +42,7 @@ import Control.Arrow.Needle.Internal.UnevenGrid as G
 -- | The datatype representing a generic needle arrow.
 
 data NeedleArrow = Input Int Int
-                 | Through NeedleArrow T.Text
+                 | Through (Maybe NeedleArrow) T.Text
                  | Join [NeedleArrow]
     deriving (Show, Read, Eq)
 
@@ -170,11 +170,7 @@ arrowToPosition grid pos = gridExamine grid pos go
                         return $ mfilter (== (Switch Up)) e
                     let paths = rights $ [left,up,down]
                         mJoint = arrowJoin paths
-                    case mJoint of
-                        Nothing -> do
-                            (n, _) <- G.getPosition
-                            err $ "External arrow '" ++ T.unpack t ++ "' on line " ++ show (n + 1) ++ " has no arrow going into it"
-                        Just joint -> success $ Through joint t
+                    success $ Through mJoint t
                 Switch d -> do
                     left <- tryPath leftGet
                     continuing <- tryPath $ do
