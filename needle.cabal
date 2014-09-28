@@ -5,10 +5,12 @@ description:         Needle is a domain specific language for ASCII-fied arrow n
 license:             MIT
 license-file:        LICENSE
 author:              Josh Kirklin
-maintainer:          jjvk2@cam.ac.uk
+maintainer:          Josh Kirklin <jjvk2@cam.ac.uk>
 copyright:           (c) 2014 Josh Kirklin
 category:            Control
 build-type:          Simple
+stability:           experimental
+bug-reports:         https://github.com/ScrambledEggsOnToast/needle/issues
 cabal-version:       >=1.10
 
 library
@@ -26,3 +28,7 @@ library
                      , haskell-src-meta >=0.6 && <0.7
                      , vector >= 0.10 && <0.11
   default-language:    Haskell2010
+
+source-repository head
+  type:     git
+  location: git://github.com/ScrambledEggsOnToast/needle.git
