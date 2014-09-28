@@ -1,9 +1,10 @@
 name:                needle
-version:             0.1.0.0
+version:             0.1.0.1
 synopsis:            ASCII-fied arrow notation
 description:         Needle is a domain specific language for ASCII-fied arrow notation. See "Control.Arrow.Needle" for more information and an example.
 license:             MIT
 license-file:        LICENSE
+homepage:            http://scrambledeggsontoast.github.io/2014/09/28/needle-announce/
 author:              Josh Kirklin
 maintainer:          Josh Kirklin <jjvk2@cam.ac.uk>
 copyright:           (c) 2014 Josh Kirklin
