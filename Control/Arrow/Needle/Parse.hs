@@ -1,3 +1,13 @@
+{-|
+Module      : Control.Arrow.Needle.Parse
+Description : Parsing needle diagrams
+Copyright   : (c) 2014 Josh Kirklin
+License     : MIT
+Maintainer  : jjvk2@cam.ac.uk
+
+This module's main export is 'parseNeedle', which parses a needle diagram into a `NeedleArrow`.
+-}
+
 module Control.Arrow.Needle.Parse (
   -- * Parsing needles
     NeedleArrow (..)
@@ -29,14 +39,14 @@ import Control.Arrow.Needle.Internal.UnevenGrid as G
 -- Types
 --------------------------------
 
--- | The datatype representing a generic needle arrow
+-- | The datatype representing a generic needle arrow.
 
 data NeedleArrow = Input Int Int
                  | Through NeedleArrow T.Text
                  | Join [NeedleArrow]
     deriving (Show, Read, Eq)
 
--- | The grid element for the first round of parsing
+-- | The grid element for the first round of parsing.
 
 data NeedleElem = None
                 | Track
@@ -50,7 +60,7 @@ data NeedleElem = None
                 | TunnelExit
     deriving (Show, Read, Eq)
 
--- | Errors in parsing
+-- | Errors in parsing.
 
 data NeedleError = ParseError String
                  | ConstructionError String
@@ -58,7 +68,7 @@ data NeedleError = ParseError String
 instance Show NeedleError where
     show = presentNeedleError
 
--- | Present the error
+-- | Present the error.
 
 presentNeedleError :: NeedleError -> String
 presentNeedleError (ParseError s) = "Needle parse error:\n"++s

@@ -1,3 +1,13 @@
+{-|
+Module      : Control.Arrow.Needle.TH
+Description : Template Haskell for needle
+Copyright   : (c) 2014 Josh Kirklin
+License     : MIT
+Maintainer  : jjvk2@cam.ac.uk
+
+This module combines the parsing from "Control.Arrow.Needle.Parse" with Template Haskell.
+-}
+
 {-# LANGUAGE TemplateHaskell, TupleSections #-}
 
 module Control.Arrow.Needle.TH (
@@ -51,7 +61,11 @@ nd = QuasiQuoter {
 -- > exampleArrow = $(ndFile "example.nd")
 
 ndFile :: FilePath -> ExpQ
-ndFile = undefined
+ndFile fp = do
+    str <- runIO $ readFile fp
+    case (parseNeedle str) of
+        Left e -> error . presentNeedleError $ e
+        Right n -> arrowQ n
 
 -- | Convert NeedleArrow to ExpQ
 
