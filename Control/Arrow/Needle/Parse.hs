@@ -33,7 +33,6 @@ import Control.Arrow.Needle.Internal.UnevenGrid as G
 
 data NeedleArrow = Input Int Int
                  | Through NeedleArrow T.Text
-                 | Select NeedleArrow Int
                  | Join [NeedleArrow]
     deriving (Show, Read, Eq)
 
@@ -49,7 +48,6 @@ data NeedleElem = None
                 | Switch Direction
                 | TunnelEntrance
                 | TunnelExit
-                | Sel Int
     deriving (Show, Read, Eq)
 
 -- | Errors in parsing
@@ -202,16 +200,6 @@ arrowToPosition grid pos = gridExamine grid pos go
                             err $ "Tunnel entrance has no arrow going into it on line " ++ (show n)
                         Just _ -> go
 
-                Sel n -> do
-                    ml <- leftGet
-                    case ml of
-                        Nothing -> do
-                            (n,_) <- G.getPosition
-                            err $ "Selector has no arrow going into it on line " ++ (show n)
-                        Just _ -> do
-                            g <- go
-                            return $ (flip Select n) <$> g
-
 --------------------------------
 -- String -> NeedleGrid
 --------------------------------
@@ -238,9 +226,6 @@ prettyNeedleGrid = prettyGrid prettyElem
     prettyElem (Switch Down)  n = replicate n '\\'
     prettyElem TunnelEntrance n = replicate n ')'
     prettyElem TunnelExit     n = replicate n '('
-    prettyElem (Sel i)        n = s ++ prettyElem Track (n - length s)
-      where
-        s = show i
 
 -- | Parse a needle grid
 
@@ -258,7 +243,7 @@ parseNeedleGrid s = case result of
         p <- P.getPosition
         setPosition $ setSourceLine p n
         es <- many (withWidth . choice . map try $ elemParsers n)
-        void $ try (string "-- " >> many anyChar)
+        optional $ try (string "-- " >> many anyChar)
         eof
         return es) 0 "needle expression" l
     withWidth p = do
@@ -309,8 +294,5 @@ parseNeedleGrid s = case result of
       , do
             void (char '(')
             return TunnelExit
-      , do
-            s <- natural
-            return $ Sel (fromIntegral s)
       ]
     
